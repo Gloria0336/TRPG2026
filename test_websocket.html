@@ -21,6 +21,7 @@
             padding: 15px;
             width: 300px;
             border-radius: 8px;
+            position: relative;
         }
 
         .logs {
@@ -38,11 +39,73 @@
             color: white;
             border: none;
             border-radius: 4px;
+            margin-right: 5px;
+        }
+
+        button.dodge {
+            background-color: #2196F3;
         }
 
         button:disabled {
-            background-color: #cccccc;
+            background-color: #cccccc !important;
             cursor: not-allowed;
+            color: #666;
+        }
+
+        .invincibility-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(76, 175, 80, 0.2);
+            pointer-events: none;
+            display: none;
+            border-radius: 8px;
+            border: 2px solid #4CAF50;
+        }
+
+        .warning-box {
+            color: white;
+            background-color: #f44336;
+            border-radius: 4px;
+            padding: 5px;
+            font-weight: bold;
+            text-align: center;
+            margin-top: 10px;
+            opacity: 0;
+            transition: opacity 0.1s;
+        }
+
+        .charge-bar-container {
+            width: 100%;
+            background-color: #ddd;
+            height: 10px;
+            border-radius: 5px;
+            margin-top: 5px;
+            display: none;
+        }
+
+        .charge-bar {
+            height: 100%;
+            background-color: #f44336;
+            width: 0%;
+            border-radius: 5px;
+            transition: width 0.2s linear;
+        }
+
+        .flash {
+            animation: flash-bg 0.5s ease-out;
+        }
+
+        @keyframes flash-bg {
+            0% {
+                background-color: rgba(255, 0, 0, 0.3);
+            }
+
+            100% {
+                background-color: transparent;
+            }
         }
     </style>
 </head>
@@ -55,26 +118,41 @@
     </div>
 
     <div class="container">
-        <div class="box">
-            <h3>Player</h3>
+        <div class="box" id="playerBox">
+            <div class="invincibility-overlay" id="invincibilityLayer"></div>
+            <h3>Player <span id="dodgeTag" style="color:green; font-size: 0.8em; display:none;">(Dodging)</span></h3>
             <p>HP: <span id="playerHp">--</span> / <span id="playerMaxHp">--</span></p>
             <p>MP: <span id="playerMp">--</span> / <span id="playerMaxMp">--</span></p>
             <hr>
-            <button id="skill1" onclick="castSkill(1)" disabled>Cast Fireball (MP: 15)</button>
+            <div style="display:flex; flex-direction: column; gap:10px;">
+                <button id="skill1" onclick="castSkill(1)" disabled>Fireball (MP: 15)<br><span
+                        id="cdText_1"></span></button>
+                <button id="btnDodge" class="dodge" onclick="castDodge()" disabled>Dodge<br><span
+                        id="cdText_dodge"></span></button>
+            </div>
         </div>
 
-        <div class="box">
+        <div class="box" id="enemyBox">
             <h3>Enemy</h3>
             <p>HP: <span id="enemyHp">--</span> / <span id="enemyMaxHp">--</span></p>
+            <div class="warning-box" id="warningBox">!!! PREPARING ATTACK !!!</div>
+            <div class="charge-bar-container" id="chargeContainer">
+                <div class="charge-bar" id="chargeBar"></div>
+            </div>
         </div>
     </div>
 
-    <h3>Combat Logs</h3>
+    <h3 style="margin-top: 20px;">Combat Logs</h3>
     <div class="logs" id="logBox"></div>
 
     <script>
         const combatId = "test_combat_001";
         let ws = null;
+
+        // Cooldown timer loop
+        let cooldowns = {}; // { id: server_ready_timestamp }
+        let timeOffset = 0; // rough estimation of server time offset
+        let isCombatActive = false;
 
         async function startCombat() {
             try {
@@ -93,7 +171,7 @@
 
             ws.onopen = () => {
                 appendLog("System: Connected to WebSocket Server");
-                document.getElementById('skill1').disabled = false;
+                isCombatActive = true;
             };
 
             ws.onmessage = (event) => {
@@ -103,11 +181,20 @@
 
             ws.onclose = () => {
                 appendLog("System: WebSocket Disconnected");
-                document.getElementById('skill1').disabled = true;
+                isCombatActive = false;
+                disableAllButtons();
             };
         }
 
         function updateUI(state) {
+            // Check if player took damage
+            if (parseInt(document.getElementById('playerHp').innerText) > state.player_hp) {
+                const pBox = document.getElementById('playerBox');
+                pBox.classList.remove('flash');
+                void pBox.offsetWidth; // trigger reflow
+                pBox.classList.add('flash');
+            }
+
             document.getElementById('playerHp').innerText = state.player_hp;
             document.getElementById('playerMaxHp').innerText = state.player_max_hp;
             document.getElementById('playerMp').innerText = state.player_mp;
@@ -116,28 +203,93 @@
             document.getElementById('enemyHp').innerText = state.enemy_hp;
             document.getElementById('enemyMaxHp').innerText = state.enemy_max_hp;
 
-            // Update Logs (replace all to avoid infinite growing for now)
-            const logBox = document.getElementById('logBox');
-            logBox.innerHTML = state.logs.map(log => `<div>${log}</div>`).join("");
-            logBox.scrollTop = logBox.scrollHeight;
+            // Sync Cooldowns
+            cooldowns = state.player_cooldowns || {};
 
-            if (!state.is_active) {
-                document.getElementById('skill1').disabled = true;
+            // Sync Enemy Attack Indicator
+            const warnBox = document.getElementById('warningBox');
+            const chargeBg = document.getElementById('chargeContainer');
+            const chargeBar = document.getElementById('chargeBar');
+
+            if (state.enemy_action_state === 'charging') {
+                warnBox.style.opacity = '1';
+                chargeBg.style.display = 'block';
+                chargeBar.style.width = (state.enemy_action_progress * 100) + '%';
+            } else {
+                warnBox.style.opacity = '0';
+                chargeBg.style.display = 'none';
+                chargeBar.style.width = '0%';
             }
+
+            // Player Invincibility indicator
+            document.getElementById('invincibilityLayer').style.display = state.player_dodge_status ? 'block' : 'none';
+            document.getElementById('dodgeTag').style.display = state.player_dodge_status ? 'inline' : 'none';
+
+            // Logs
+            const logBox = document.getElementById('logBox');
+            const currentLogs = logBox.innerHTML;
+            logBox.innerHTML = state.logs.map(log => `<div>${log}</div>`).join("");
+            if (currentLogs !== logBox.innerHTML) {
+                logBox.scrollTop = logBox.scrollHeight;
+            }
+
+            isCombatActive = state.is_active;
+            if (!state.is_active) {
+                disableAllButtons();
+            }
+        }
+
+        function disableAllButtons() {
+            document.getElementById('skill1').disabled = true;
+            document.getElementById('btnDodge').disabled = true;
+            document.getElementById('cdText_1').innerText = "";
+            document.getElementById('cdText_dodge').innerText = "";
         }
 
         function castSkill(skillId) {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    action: "cast_skill",
-                    skill_id: skillId
-                }));
+                ws.send(JSON.stringify({ action: "cast_skill", skill_id: skillId }));
+            }
+        }
+
+        function castDodge() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: "dodge" }));
             }
         }
 
         function appendLog(msg) {
             const logBox = document.getElementById('logBox');
             logBox.innerHTML += `<div><strong>${msg}</strong></div>`;
+        }
+
+        // --- Client-side Cooldown UI Loop ---
+        setInterval(() => {
+            if (!isCombatActive) return;
+
+            // Local estimation (we get server time stamp from python's time.time(). 
+            // In a real app we sync local vs server time drift. Here we just use roughly accurate JS time / 1000)
+            const now = Date.now() / 1000.0;
+
+            // skill1
+            checkAndUpdateButton("1", "skill1", now);
+            // dodge
+            checkAndUpdateButton("dodge", "btnDodge", now);
+
+        }, 100);
+
+        function checkAndUpdateButton(cdKey, btnId, now) {
+            const btn = document.getElementById(btnId);
+            const txt = document.getElementById("cdText_" + cdKey);
+            const cdTime = cooldowns[cdKey] || 0;
+
+            if (cdTime > now) {
+                btn.disabled = true;
+                txt.innerText = (cdTime - now).toFixed(1) + "s";
+            } else {
+                btn.disabled = false;
+                txt.innerText = "";
+            }
         }
     </script>
 </body>

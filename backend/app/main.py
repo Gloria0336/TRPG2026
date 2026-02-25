@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.database import engine, Base, get_db
@@ -11,6 +12,15 @@ from app.core.combat_engine import manager as combat_manager
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="末日超能力生存遊戲 API", version="0.1.0")
+
+# 設定 CORS，解決前端網頁測試時的跨域問題 (CORS policy)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允許所有來源，方便開發與測試
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def read_root():

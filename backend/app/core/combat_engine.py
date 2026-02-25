@@ -14,9 +14,13 @@ class CombatState(BaseModel):
     player_max_mp: int
     enemy_hp: int
     enemy_max_hp: int
-    player_cooldowns: Dict[int, float]  # {skill_id: ready_time}
+    player_cooldowns: Dict[str, float]  # {skill_id: ready_time}
     logs: list[str]
     is_active: bool
+    # 新增機制
+    enemy_action_state: str        # 'idle' or 'charging'
+    enemy_action_progress: float   # 0.0 ~ 1.0 (給前端畫蓄力條)
+    player_dodge_status: bool      # 玩家是否處於無敵狀態
 
 class ActiveCombat:
     """管理單一戰鬥實例 (State Machine)"""
@@ -31,8 +35,15 @@ class ActiveCombat:
         self.connections: list[WebSocket] = []
         
         # 冷卻與效果追蹤
-        self.player_cooldowns: Dict[int, float] = {}
-        self.enemy_cooldowns: Dict[int, float] = {}
+        self.player_cooldowns: Dict[str, float] = {}
+        self.enemy_cooldowns: Dict[str, float] = {}
+        
+        # 新增戰鬥機制狀態
+        self.enemy_state = "idle" # 'idle', 'charging'
+        self.enemy_charge_start_time = 0.0
+        self.enemy_charge_duration = 1.5 # 敵人蓄力 1.5 秒
+        
+        self.player_invulnerable_until = 0.0 # 無敵幀結束時間
         
         self.is_active = True
         self.combat_logs: list[str] = [f"戰鬥開始！遭遇了 {self.enemy.get('name', '敵人')}！"]
@@ -53,6 +64,13 @@ class ActiveCombat:
         if not self.connections:
             return
             
+        current_time = time.time()
+        # 計算蓄力進度
+        progress = 0.0
+        if self.enemy_state == "charging" and self.enemy_charge_duration > 0:
+            progress = (current_time - self.enemy_charge_start_time) / self.enemy_charge_duration
+            progress = min(1.0, progress)
+            
         state = CombatState(
             combat_id=self.combat_id,
             player_hp=self.player["current_hp"],
@@ -63,7 +81,10 @@ class ActiveCombat:
             enemy_max_hp=self.enemy["max_hp"],
             player_cooldowns=self.player_cooldowns,
             logs=self.combat_logs[-5:], # 只傳送最近 5 條 LOG
-            is_active=self.is_active
+            is_active=self.is_active,
+            enemy_action_state=self.enemy_state,
+            enemy_action_progress=progress,
+            player_dodge_status=(current_time < self.player_invulnerable_until)
         )
         
         for connection in self.connections:
@@ -75,13 +96,31 @@ class ActiveCombat:
     async def game_loop(self):
         """背景即時運算迴圈 (Tick)"""
         while self.is_active:
-            # 1. 處理敵人 AI (簡化版：每 3 秒自動攻擊一次)
             current_time = time.time()
-            if current_time >= self.enemy_cooldowns.get("auto_attack", 0):
-                self.enemy_cooldowns["auto_attack"] = current_time + 3.0
-                damage = max(1, self.enemy.get("strength", 5) - self.player.get("agility", 5) // 2)
-                self.player["current_hp"] -= damage
-                self.combat_logs.append(f"敵人對你造成 {damage} 點傷害！")
+            
+            # 1. 處理敵人 AI (蓄力與攻擊判定)
+            if self.enemy_state == "idle":
+                # 每 4 秒發起一次攻擊準備
+                if current_time >= self.enemy_cooldowns.get("auto_attack", 0):
+                    self.enemy_state = "charging"
+                    self.enemy_charge_start_time = current_time
+                    self.combat_logs.append(f"敵人正在蓄力準備攻擊！")
+            
+            elif self.enemy_state == "charging":
+                # 檢查是否蓄力完成
+                if current_time >= self.enemy_charge_start_time + self.enemy_charge_duration:
+                    self.enemy_state = "idle"
+                    self.enemy_cooldowns["auto_attack"] = current_time + 4.0 # 下一次攻擊在 4 秒後
+                    
+                    # 傷害與閃避判定
+                    if current_time < self.player_invulnerable_until:
+                        # 玩家無敵幀中，閃避成功！
+                        self.combat_logs.append("【閃避成功】你躲開了致命的一擊！ MP +10")
+                        self.player["current_mp"] = min(self.player["max_mp"], self.player["current_mp"] + 10)
+                    else:
+                        damage = max(1, self.enemy.get("strength", 5) - self.player.get("agility", 5) // 2)
+                        self.player["current_hp"] -= damage
+                        self.combat_logs.append(f"敵人狠狠地砸了下來，對你造成 {damage} 點傷害！")
             
             # 2. 檢查生死
             self.check_win_condition()
@@ -91,16 +130,30 @@ class ActiveCombat:
             
             # 每 0.2 秒 Tick 一次 (5 FPS 網頁足夠了，降低伺服器負擔)
             await asyncio.sleep(0.2)
+            
+        # 當迴圈被 is_active = False 終止時，補送最後一次狀態給前端更新死亡畫面
+        await self.broadcast_state()
 
     def process_player_action(self, action_data: dict, current_time: float):
-        """處理前端傳來的指令 (施放技能/普攻)"""
+        """處理前端傳來的指令 (施放技能/閃避)"""
         if not self.is_active:
             return
             
         action_type = action_data.get("action")
         
-        if action_type == "cast_skill":
-            skill_id = action_data.get("skill_id")
+        if action_type == "dodge":
+            # 閃避技能 CD
+            if current_time < self.player_cooldowns.get("dodge", 0):
+                self.combat_logs.append("閃避還在冷卻中！")
+                return
+            
+            # 給予 0.5 秒無敵幀，冷卻 2.5 秒
+            self.player_invulnerable_until = current_time + 0.5
+            self.player_cooldowns["dodge"] = current_time + 2.5
+            self.combat_logs.append("你進行了翻滾閃避！(無敵 0.5 秒)")
+            
+        elif action_type == "cast_skill":
+            skill_id = str(action_data.get("skill_id")) # dictionary key convert
             # 這裡應該去 DB 撈 SystemSkillTemplate
             # 簡化示範：火球術 (ID 1), CD 5秒, 消耗 15 MP, 傷害 20
             mock_skill = {"id": 1, "base_damage": 20, "cooldown_sec": 5.0, "cost_mp": 15}
@@ -132,10 +185,12 @@ class ActiveCombat:
         if self.enemy["current_hp"] <= 0:
             self.enemy["current_hp"] = 0
             self.is_active = False
+            self.enemy_state = "idle"
             self.combat_logs.append("你贏得了這場戰鬥！")
         elif self.player["current_hp"] <= 0:
             self.player["current_hp"] = 0
             self.is_active = False
+            self.enemy_state = "idle"
             self.combat_logs.append("你被擊倒了...")
 
 
