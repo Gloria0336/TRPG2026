@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Combat Test Client</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+        }
+
+        .container {
+            display: flex;
+            gap: 20px;
+        }
+
+        .box {
+            border: 1px solid #ccc;
+            padding: 15px;
+            width: 300px;
+            border-radius: 8px;
+        }
+
+        .logs {
+            height: 200px;
+            overflow-y: scroll;
+            border: 1px solid #aaa;
+            padding: 10px;
+            background: #f9f9f9;
+        }
+
+        button {
+            padding: 10px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>WebSocket Combat Test</h2>
+    <div style="margin-bottom: 20px;">
+        <button onclick="startCombat()">1. Start Combat Session API</button>
+        <button onclick="connectWS()" id="connectBtn" disabled>2. Connect WebSocket</button>
+    </div>
+
+    <div class="container">
+        <div class="box">
+            <h3>Player</h3>
+            <p>HP: <span id="playerHp">--</span> / <span id="playerMaxHp">--</span></p>
+            <p>MP: <span id="playerMp">--</span> / <span id="playerMaxMp">--</span></p>
+            <hr>
+            <button id="skill1" onclick="castSkill(1)" disabled>Cast Fireball (MP: 15)</button>
+        </div>
+
+        <div class="box">
+            <h3>Enemy</h3>
+            <p>HP: <span id="enemyHp">--</span> / <span id="enemyMaxHp">--</span></p>
+        </div>
+    </div>
+
+    <h3>Combat Logs</h3>
+    <div class="logs" id="logBox"></div>
+
+    <script>
+        const combatId = "test_combat_001";
+        let ws = null;
+
+        async function startCombat() {
+            try {
+                const res = await fetch(`http://localhost:8000/combat/start/${combatId}`, { method: 'POST' });
+                const data = await res.json();
+                console.log("Combat Created:", data);
+                document.getElementById('connectBtn').disabled = false;
+                appendLog("System: Combat session created via API");
+            } catch (e) {
+                appendLog("Error calling API: " + e);
+            }
+        }
+
+        function connectWS() {
+            ws = new WebSocket(`ws://localhost:8000/ws/combat/${combatId}`);
+
+            ws.onopen = () => {
+                appendLog("System: Connected to WebSocket Server");
+                document.getElementById('skill1').disabled = false;
+            };
+
+            ws.onmessage = (event) => {
+                const state = JSON.parse(event.data);
+                updateUI(state);
+            };
+
+            ws.onclose = () => {
+                appendLog("System: WebSocket Disconnected");
+                document.getElementById('skill1').disabled = true;
+            };
+        }
+
+        function updateUI(state) {
+            document.getElementById('playerHp').innerText = state.player_hp;
+            document.getElementById('playerMaxHp').innerText = state.player_max_hp;
+            document.getElementById('playerMp').innerText = state.player_mp;
+            document.getElementById('playerMaxMp').innerText = state.player_max_mp;
+
+            document.getElementById('enemyHp').innerText = state.enemy_hp;
+            document.getElementById('enemyMaxHp').innerText = state.enemy_max_hp;
+
+            // Update Logs (replace all to avoid infinite growing for now)
+            const logBox = document.getElementById('logBox');
+            logBox.innerHTML = state.logs.map(log => `<div>${log}</div>`).join("");
+            logBox.scrollTop = logBox.scrollHeight;
+
+            if (!state.is_active) {
+                document.getElementById('skill1').disabled = true;
+            }
+        }
+
+        function castSkill(skillId) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    action: "cast_skill",
+                    skill_id: skillId
+                }));
+            }
+        }
+
+        function appendLog(msg) {
+            const logBox = document.getElementById('logBox');
+            logBox.innerHTML += `<div><strong>${msg}</strong></div>`;
+        }
+    </script>
+</body>
+
+</html>
