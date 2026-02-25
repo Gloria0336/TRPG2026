@@ -1,6 +1,7 @@
 {
-    "python.defaultInterpreterPath": "C:\\\\Python314\\\\python.exe",
+    "python.defaultInterpreterPath": "C:\\Python314\\python.exe",
     "python.analysis.extraPaths": [
-        "${workspaceFolder}/backend"
+        "${workspaceFolder}/backend",
+        "C:\\Users\\user\\AppData\\Roaming\\Python\\Python314\\site-packages"
     ]
 }
